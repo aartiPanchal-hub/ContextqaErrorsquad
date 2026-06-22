@@ -1,71 +1,106 @@
-name: Run ContextQA Tests
+name: ContextQA Test Plan Execution
+
 on:
   push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
-  test:
-    name: ContextQA Test Plan
+  run-contextqa-tests:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Run ContextQA Test Plan
-        env:
-          CONTEXTQA_USERNAME: ${{ secrets.CONTEXTQA_USERNAME }}
-          CONTEXTQA_PASSWORD: ${{ secrets.CONTEXTQA_PASSWORD }}
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Test Variables
         run: |
-          pip install requests
-          python -c "
-          import requests, os, time, sys
+          echo "TEST_PLAN_ID=286" >> $GITHUB_ENV
+          echo "TOKEN=e/OlMg4S3EwtUyzaeMV98Q==" >> $GITHUB_ENV
 
-          username = os.environ['CONTEXTQA_USERNAME']
-          password = os.environ['CONTEXTQA_PASSWORD']
-          plan_id = '${{ vars.CONTEXTQA_PLAN_ID }}'
+      - name: Trigger Test Plan Execution (Start Test Run)
+        id: trigger-test
+        run: |
+          echo "Triggering test execution for Test Plan ID: $TEST_PLAN_ID"
 
-          # Authenticate
-          auth_resp = requests.post(
-              'https://server.contextqa.com/api/v1/auth/login',
-              json={'username': username, 'password': password},
-              timeout=30
+          API_URL="https://server.contextqa.com/test_plans/$TEST_PLAN_ID/execution?apk_build_url=$APK_BUILD_URL&ipa_build_url=$IPA_BUILD_URL"
+
+          echo "Calling API: $API_URL"
+
+          RESPONSE=$(curl -s -w "%{http_code}" --location "$API_URL" \
+            --header "token: $TOKEN"
           )
-          auth_resp.raise_for_status()
-          token = auth_resp.json()['token']
-          headers = {'Authorization': f'Bearer {token}'}
 
-          # Trigger test plan execution (GET request)
-          run_resp = requests.get(
-              f'https://server.contextqa.com/api/v1/testplans/{plan_id}/execute',
-              headers=headers,
-              timeout=30
-          )
-          run_resp.raise_for_status()
-          execution_id = run_resp.json()['executionId']
-          print(f'Execution started: {execution_id}')
+          HTTP_CODE="${RESPONSE: -3}"
+          BODY="${RESPONSE::-3}"
 
-          # Poll for result (up to 30 minutes)
-          for attempt in range(60):
-              time.sleep(30)
-              status_resp = requests.get(
-                  f'https://server.contextqa.com/api/v1/executions/{execution_id}/status',
-                  headers=headers,
-                  timeout=30
-              )
-              status_resp.raise_for_status()
-              data = status_resp.json()
-              status = data.get('status', 'RUNNING')
-              print(f'Attempt {attempt + 1}: {status}')
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "❌ API Error while starting test!"
+            echo "HTTP Code: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
 
-              if status == 'PASSED':
-                  print('All tests passed.')
-                  print(f\"Results: https://app.contextqa.com/executions/{execution_id}\")
-                  sys.exit(0)
-              elif status in ['FAILED', 'ERROR', 'ABORTED']:
-                  print(f'Tests failed: {status}')
-                  print(f\"Results: https://app.contextqa.com/executions/{execution_id}\")
-                  sys.exit(1)
+          echo "Response: $BODY"
 
-          print('Timeout: execution did not complete within 30 minutes.')
-          sys.exit(1)
-          "
+          JOB_ID=$(echo $BODY | jq -r '.id')
+
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "❌ ERROR: Job ID missing in API response!"
+            echo "Full Response: $BODY"
+            exit 1
+          fi
+
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+          echo "Started Test Job ID: $JOB_ID"
+
+      - name: Wait before polling
+        run: sleep 10
+        
+      - name: Poll Test Result Until Completed
+        id: poll-result
+        run: |
+          echo "⏳ Waiting for test plan $TEST_PLAN_ID to complete..."
+          STATUS=""
+          PREV_COMPLETED=-1
+
+          while [ "$STATUS" != "STATUS_COMPLETED" ]; do
+            sleep 30
+            RESPONSE=$(curl -s --location "https://server.contextqa.com/test_plan_results/$JOB_ID/results" \
+              --header "token: $TOKEN")
+
+            RESULT=$(echo $RESPONSE | jq -r '.result')
+            STATUS=$(echo $RESPONSE | jq -r '.status')
+            TOTAL=$(echo $RESPONSE | jq -r '.totalCount')
+            PASSED=$(echo $RESPONSE | jq -r '.passedCount')
+            FAILED=$(echo $RESPONSE | jq -r '.failedCount')
+            ABORTED=$(echo $RESPONSE | jq -r '.abortedCount')
+            STOPPED=$(echo $RESPONSE | jq -r '.stoppedCount')
+            NOT_EXEC=$(echo $RESPONSE | jq -r '.notExecutedCount')
+            REPORT_URL=$(echo $RESPONSE | jq -r '.reportFileUrl')
+
+            COMPLETED=$((PASSED + FAILED + ABORTED + STOPPED + NOT_EXEC))
+
+            if [ "$COMPLETED" -ne "$PREV_COMPLETED" ]; then
+              echo "➡️ Status: $STATUS | Completed: $COMPLETED / $TOTAL | Passed: $PASSED | Failed: $FAILED"
+              PREV_COMPLETED=$COMPLETED
+            else
+              echo "➡️ Status: $STATUS | No new updates..."
+            fi
+
+            if [ "$STATUS" = "STATUS_COMPLETED" ]; then
+              echo "🟢 Status: COMPLETED – All tests finished."
+              break
+            fi
+          done
+
+          echo "RESULT_JSON=$RESPONSE" >> $GITHUB_ENV
+          echo "FINAL_RESULT=$RESULT" >> $GITHUB_ENV
+          echo "TOTAL=$TOTAL" >> $GITHUB_ENV
+          echo "PASSED=$PASSED" >> $GITHUB_ENV
+          echo "FAILED=$FAILED" >> $GITHUB_ENV
+          echo "REPORT_URL=$REPORT_URL" >> $GITHUB_ENV
+
+          echo "✔️ Test Execution Completed"
+          echo "🧾 FINAL RESULT: $RESULT"
+          echo "📌 JOB ID: $JOB_ID"
