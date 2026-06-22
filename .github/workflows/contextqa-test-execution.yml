@@ -16,7 +16,7 @@ jobs:
       - name: Set Test Variables
         run: |
           echo "TEST_PLAN_ID=286" >> $GITHUB_ENV
-          echo "TOKEN=${{ secrets.CONTEXTQA_TOKEN }}" >> $GITHUB_ENV
+          echo "TOKEN=e/OlMg4S3EwtUyzaeMV98Q==" >> $GITHUB_ENV
 
       - name: Trigger Test Plan Execution (Start Test Run)
         id: trigger-test
